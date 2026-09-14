@@ -25,6 +25,7 @@ export default function Dashboard() {
   const [jiraMetrics, setJiraMetrics] = useState<JiraMetrics | null>(null);
   const [teamMetrics, setTeamMetrics] = useState<TeamMemberMetrics[]>([]);
   const [loading, setLoading] = useState(true);
+  const [syncSuccess, setSyncSuccess] = useState(false);
 
   const fetchMetrics = useCallback(async () => {
     setLoading(true);
@@ -75,6 +76,8 @@ export default function Dashboard() {
     ]);
     await fetchUsers();
     await fetchMetrics();
+    setSyncSuccess(true);
+    setTimeout(() => setSyncSuccess(false), 3000);
   };
 
   const handleExport = (exportFormat: "csv" | "pdf") => {
@@ -97,6 +100,12 @@ export default function Dashboard() {
   return (
     <div className="min-h-screen bg-background">
       <Header onSync={handleSync} onExport={handleExport} />
+
+      {syncSuccess && (
+        <div className="bg-green-50 border border-green-200 text-green-800 px-4 py-3 rounded-md mx-4 mt-4">
+          Data synced successfully!
+        </div>
+      )}
 
       <main className="container mx-auto px-4 py-6 space-y-6">
         <div className="flex flex-wrap items-center gap-4">

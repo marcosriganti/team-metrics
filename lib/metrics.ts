@@ -94,7 +94,7 @@ export function getBitbucketMetrics(
     .get(...userParams) as { avg: number | null };
 
   const avgCommentsPerPr =
-    prsReviewed.count > 0 ? commentsMade.count / prsReviewed.count : 0;
+    prsAuthored.count > 0 ? commentsMade.count / prsAuthored.count : 0;
 
   return {
     prsAuthored: prsAuthored.count,
