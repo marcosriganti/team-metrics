@@ -46,9 +46,14 @@ export async function GET() {
     };
     debug.jiraCurlExamples = {
       myself: getJiraCurl("/myself"),
-      searchIssues: getJiraCurl(`/search?jql=project=${jiraConfig.projectKey}&maxResults=5`),
+      searchIssues: getJiraCurl("/search/jql"),
       projectStatuses: getJiraCurl("/project/{projectKey}/statuses"),
     };
+
+    // Warn about project key with spaces
+    if (jiraConfig.projectKey.includes(" ")) {
+      debug.jiraWarning = `WARNING: JIRA_PROJECT_KEY="${jiraConfig.projectKey}" contains spaces. Project keys should be like "PROJ" or "BIGORDER", not "BIG ORDER". Check your JIRA project settings for the correct key.`;
+    }
   } catch (error) {
     debug.jira = {
       status: "error",

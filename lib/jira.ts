@@ -24,6 +24,11 @@ export function getConfig() {
     token: token ? `"${token.slice(0, 4)}..."` : "MISSING",
   });
 
+  // Validate project key format (no spaces allowed)
+  if (projectKey && projectKey.includes(" ")) {
+    logError("WARNING: JIRA_PROJECT_KEY contains spaces. Project keys should be like 'PROJ' or 'BIGORDER', not 'BIG ORDER'");
+  }
+
   if (!host || !projectKey || !email || !token) {
     const missing = [];
     if (!host) missing.push("JIRA_HOST");
@@ -43,6 +48,7 @@ function getHeaders(): HeadersInit {
   return {
     Authorization: `Basic ${auth}`,
     Accept: "application/json",
+    "Content-Type": "application/json",
   };
 }
 
@@ -76,7 +82,10 @@ export interface JiraChangelogEntry {
 }
 
 async function fetchWithLogging(url: string, options: RequestInit = {}): Promise<Response> {
-  log("Fetching:", url);
+  log("Fetching:", url, options.method || "GET");
+  if (options.body) {
+    log("Request body:", options.body);
+  }
 
   const response = await fetch(url, {
     ...options,
@@ -118,6 +127,13 @@ async function fetchWithLogging(url: string, options: RequestInit = {}): Promise
         `Response: ${body.slice(0, 200)}`
       );
     }
+    if (response.status === 410) {
+      throw new Error(
+        `JIRA API Deprecated (410): The API endpoint has been removed.\n` +
+        `This should not happen - please report this bug.\n` +
+        `Response: ${body.slice(0, 300)}`
+      );
+    }
 
     throw new Error(`JIRA API error: ${response.status} ${response.statusText} - ${body.slice(0, 200)}`);
   }
@@ -125,29 +141,43 @@ async function fetchWithLogging(url: string, options: RequestInit = {}): Promise
   return response;
 }
 
+// New JIRA search API (POST /rest/api/3/search/jql)
+// See: https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-search/#api-rest-api-3-search-jql-post
 export async function* fetchIssues(since?: string): AsyncGenerator<JiraIssue> {
   const { projectKey } = getConfig();
   const baseUrl = getBaseUrl();
 
-  let jql = `project = ${projectKey} ORDER BY updated DESC`;
+  // Quote project key in case it contains special chars (though it shouldn't have spaces)
+  let jql = `project = "${projectKey}" ORDER BY updated DESC`;
   if (since) {
     const sinceDate = since.split("T")[0];
-    jql = `project = ${projectKey} AND updated >= "${sinceDate}" ORDER BY updated DESC`;
+    jql = `project = "${projectKey}" AND updated >= "${sinceDate}" ORDER BY updated DESC`;
   }
 
   log("Fetching issues with JQL:", jql);
 
-  let startAt = 0;
+  let nextPageToken: string | undefined;
   const maxResults = 50;
 
   while (true) {
-    const url = `${baseUrl}/search?jql=${encodeURIComponent(jql)}&startAt=${startAt}&maxResults=${maxResults}&fields=issuetype,assignee,summary,status,customfield_10016,created,resolutiondate`;
+    // Use new POST /search/jql endpoint
+    const url = `${baseUrl}/search/jql`;
+    const body = {
+      jql,
+      maxResults,
+      fields: ["issuetype", "assignee", "summary", "status", "customfield_10016", "created", "resolutiondate"],
+      ...(nextPageToken ? { nextPageToken } : {}),
+    };
 
-    const response = await fetchWithLogging(url);
+    const response = await fetchWithLogging(url, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+
     const data = await response.json();
-    const issues: JiraIssue[] = data.issues;
+    const issues: JiraIssue[] = data.issues || [];
 
-    log("Fetched issues:", { count: issues.length, total: data.total, startAt });
+    log("Fetched issues:", { count: issues.length, total: data.total, nextPageToken: data.nextPageToken });
 
     if (issues.length === 0) {
       break;
@@ -157,8 +187,10 @@ export async function* fetchIssues(since?: string): AsyncGenerator<JiraIssue> {
       yield issue;
     }
 
-    startAt += maxResults;
-    if (startAt >= data.total) {
+    // Use cursor-based pagination
+    if (data.nextPageToken) {
+      nextPageToken = data.nextPageToken;
+    } else {
       break;
     }
   }
@@ -176,7 +208,7 @@ export async function* fetchIssueChangelog(
 
     const response = await fetchWithLogging(url);
     const data = await response.json();
-    const entries: JiraChangelogEntry[] = data.values;
+    const entries: JiraChangelogEntry[] = data.values || [];
 
     if (entries.length === 0) {
       break;
@@ -220,6 +252,11 @@ export function getCurlCommand(endpoint: string): string {
   const baseUrl = `https://${host}/rest/api/3`;
   const url = `${baseUrl}${endpoint}`.replace("{projectKey}", projectKey);
   const auth = Buffer.from(`${email}:${token}`).toString("base64");
+
+  if (endpoint.includes("search/jql")) {
+    // POST endpoint
+    return `curl -X POST -H "Authorization: Basic ${auth}" -H "Content-Type: application/json" -H "Accept: application/json" -d '{"jql":"project = \\"${projectKey}\\"","maxResults":5,"fields":["summary","status"]}' "${url}"`;
+  }
 
   return `curl -H "Authorization: Basic ${auth}" -H "Accept: application/json" "${url}"`;
 }

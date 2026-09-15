@@ -40,18 +40,35 @@ export function getConfig() {
 function getHeaders(): HeadersInit {
   const { token, username } = getConfig();
 
-  // App Passwords use Basic Auth with username:app_password
-  // Repository Access Tokens use Bearer
-  // If username is provided, use Basic Auth; otherwise try Bearer
-  if (username) {
+  // Detect token type based on format
+  // - App Passwords: typically alphanumeric, ~20 chars, use with username via Basic Auth
+  // - Repository Access Tokens: start with certain prefixes, use Bearer
+  // - OAuth tokens: JWT format, use Bearer
+
+  const looksLikeJwt = token.includes(".") && token.length > 100;
+  const hasUsername = !!username;
+
+  if (hasUsername) {
+    // App Password flow: username + app_password via Basic Auth
     const auth = Buffer.from(`${username}:${token}`).toString("base64");
     log("Using Basic Auth (App Password) with username:", username);
     return {
       Authorization: `Basic ${auth}`,
       Accept: "application/json",
     };
+  } else if (looksLikeJwt) {
+    // OAuth/JWT token
+    log("Using Bearer token (looks like JWT/OAuth)");
+    return {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+    };
   } else {
-    log("Using Bearer token (Repository Access Token or OAuth)");
+    // Repository Access Token or App Password without username
+    // Try Bearer first (for Repo Access Tokens)
+    log("Using Bearer token (Repository Access Token)");
+    log("Token preview:", token.slice(0, 8) + "...");
+    log("If you get 401, try setting BITBUCKET_USERNAME for App Password auth");
     return {
       Authorization: `Bearer ${token}`,
       Accept: "application/json",
