@@ -274,6 +274,26 @@ function calculateAvgCycleTime(
   return Math.round((result.avg_days || 0) * 10) / 10;
 }
 
+// Empty metrics when user doesn't exist in a system
+const emptyBitbucketMetrics: BitbucketMetrics = {
+  prsAuthored: 0,
+  prsMerged: 0,
+  prsReviewed: 0,
+  commentsMade: 0,
+  avgCommentsPerPr: 0,
+  avgPrSize: 0,
+  avgTimeToMergeDays: 0,
+};
+
+const emptyJiraMetrics: JiraMetrics = {
+  ticketsWorked: 0,
+  ticketsCompleted: 0,
+  storyPointsDelivered: 0,
+  avgTimeInProgressDays: 0,
+  avgTimeInReviewDays: 0,
+  avgCycleTimeDays: 0,
+};
+
 export function getTeamMetrics(
   startDate: string,
   endDate: string
@@ -299,11 +319,16 @@ export function getTeamMetrics(
   }
 
   // Build metrics for each unique person
+  // IMPORTANT: Only query metrics if user has an ID in that system, otherwise return zeros
   return Array.from(memberMap.entries()).map(([displayName, ids]) => ({
     userId: ids.bitbucketId || ids.jiraId || "",
     displayName,
     source: ids.bitbucketId ? "bitbucket" : "jira",
-    bitbucket: getBitbucketMetrics(ids.bitbucketId, startDate, endDate),
-    jira: getJiraMetrics(ids.jiraId, startDate, endDate),
+    bitbucket: ids.bitbucketId
+      ? getBitbucketMetrics(ids.bitbucketId, startDate, endDate)
+      : emptyBitbucketMetrics,
+    jira: ids.jiraId
+      ? getJiraMetrics(ids.jiraId, startDate, endDate)
+      : emptyJiraMetrics,
   }));
 }
