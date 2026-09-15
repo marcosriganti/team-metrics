@@ -7,7 +7,9 @@ import { MetricsCard } from "@/components/metrics-card";
 import { DateRangePicker } from "@/components/date-range-picker";
 import { UserSelector } from "@/components/user-selector";
 import { TeamTable } from "@/components/team-table";
+import { ComparisonChart } from "@/components/metrics-chart";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { BitbucketMetrics, JiraMetrics, TeamMemberMetrics } from "@/lib/metrics";
 
 interface User {
@@ -160,7 +162,18 @@ export default function Dashboard() {
                   <CardTitle>Team Comparison</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <TeamTable members={teamMetrics} />
+                  <Tabs defaultValue="table">
+                    <TabsList className="mb-4">
+                      <TabsTrigger value="table">Table</TabsTrigger>
+                      <TabsTrigger value="chart">Chart</TabsTrigger>
+                    </TabsList>
+                    <TabsContent value="table">
+                      <TeamTable members={teamMetrics} />
+                    </TabsContent>
+                    <TabsContent value="chart">
+                      <ComparisonChart members={teamMetrics} />
+                    </TabsContent>
+                  </Tabs>
                 </CardContent>
               </Card>
             )}

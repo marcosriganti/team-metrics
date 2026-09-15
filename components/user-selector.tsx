@@ -1,12 +1,6 @@
 "use client";
 
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { Combobox } from "@/components/ui/combobox";
 
 interface User {
   id: number;
@@ -21,22 +15,20 @@ interface UserSelectorProps {
 }
 
 export function UserSelector({ users, selectedUserId, onUserChange }: UserSelectorProps) {
+  const options = users.map((user) => ({
+    value: user.external_id,
+    label: user.display_name,
+  }));
+
   return (
-    <Select
-      value={selectedUserId || "all"}
-      onValueChange={(value) => onUserChange(value === "all" ? null : value)}
-    >
-      <SelectTrigger className="w-[200px]">
-        <SelectValue placeholder="Select user" />
-      </SelectTrigger>
-      <SelectContent>
-        <SelectItem value="all">All Team Members</SelectItem>
-        {users.map((user) => (
-          <SelectItem key={user.external_id} value={user.external_id}>
-            {user.display_name}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
+    <Combobox
+      options={options}
+      value={selectedUserId}
+      onValueChange={onUserChange}
+      placeholder="All Team Members"
+      searchPlaceholder="Search members..."
+      emptyText="No members found."
+      className="w-[250px]"
+    />
   );
 }

@@ -280,15 +280,30 @@ export function getTeamMetrics(
 ): TeamMemberMetrics[] {
   const db = getDb();
 
+  // Get all team members grouped by display_name to handle same person in both systems
   const members = db
-    .prepare("SELECT DISTINCT external_id, display_name, source FROM team_members WHERE is_active = 1")
+    .prepare("SELECT external_id, display_name, source FROM team_members WHERE is_active = 1")
     .all() as { external_id: string; display_name: string; source: "bitbucket" | "jira" }[];
 
-  return members.map((member) => ({
-    userId: member.external_id,
-    displayName: member.display_name,
-    source: member.source,
-    bitbucket: getBitbucketMetrics(member.external_id, startDate, endDate),
-    jira: getJiraMetrics(member.external_id, startDate, endDate),
+  // Group by display_name to merge Bitbucket and JIRA identities
+  const memberMap = new Map<string, { bitbucketId: string | null; jiraId: string | null }>();
+
+  for (const member of members) {
+    const existing = memberMap.get(member.display_name) || { bitbucketId: null, jiraId: null };
+    if (member.source === "bitbucket") {
+      existing.bitbucketId = member.external_id;
+    } else {
+      existing.jiraId = member.external_id;
+    }
+    memberMap.set(member.display_name, existing);
+  }
+
+  // Build metrics for each unique person
+  return Array.from(memberMap.entries()).map(([displayName, ids]) => ({
+    userId: ids.bitbucketId || ids.jiraId || "",
+    displayName,
+    source: ids.bitbucketId ? "bitbucket" : "jira",
+    bitbucket: getBitbucketMetrics(ids.bitbucketId, startDate, endDate),
+    jira: getJiraMetrics(ids.jiraId, startDate, endDate),
   }));
 }
