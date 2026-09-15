@@ -1,23 +1,62 @@
 const BITBUCKET_API = "https://api.bitbucket.org/2.0";
 
-function getConfig() {
+// Debug mode - logs all API calls and responses
+const DEBUG = process.env.NODE_ENV === "development" || process.env.DEBUG === "true";
+
+function log(...args: unknown[]) {
+  if (DEBUG) {
+    console.log("[Bitbucket]", ...args);
+  }
+}
+
+function logError(...args: unknown[]) {
+  console.error("[Bitbucket ERROR]", ...args);
+}
+
+export function getConfig() {
   const workspace = process.env.BITBUCKET_WORKSPACE;
   const repo = process.env.BITBUCKET_REPO;
   const token = process.env.BITBUCKET_TOKEN;
+  const username = process.env.BITBUCKET_USERNAME;
+
+  log("Config check:", {
+    workspace: workspace ? `"${workspace}"` : "MISSING",
+    repo: repo ? `"${repo}"` : "MISSING",
+    token: token ? `"${token.slice(0, 4)}..."` : "MISSING",
+    username: username ? `"${username}"` : "MISSING (optional for App Password)",
+  });
 
   if (!workspace || !repo || !token) {
-    throw new Error("Missing Bitbucket environment variables");
+    const missing = [];
+    if (!workspace) missing.push("BITBUCKET_WORKSPACE");
+    if (!repo) missing.push("BITBUCKET_REPO");
+    if (!token) missing.push("BITBUCKET_TOKEN");
+    throw new Error(`Missing Bitbucket environment variables: ${missing.join(", ")}`);
   }
 
-  return { workspace, repo, token };
+  return { workspace, repo, token, username };
 }
 
 function getHeaders(): HeadersInit {
-  const { token } = getConfig();
-  return {
-    Authorization: `Bearer ${token}`,
-    Accept: "application/json",
-  };
+  const { token, username } = getConfig();
+
+  // App Passwords use Basic Auth with username:app_password
+  // Repository Access Tokens use Bearer
+  // If username is provided, use Basic Auth; otherwise try Bearer
+  if (username) {
+    const auth = Buffer.from(`${username}:${token}`).toString("base64");
+    log("Using Basic Auth (App Password) with username:", username);
+    return {
+      Authorization: `Basic ${auth}`,
+      Accept: "application/json",
+    };
+  } else {
+    log("Using Bearer token (Repository Access Token or OAuth)");
+    return {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+    };
+  }
 }
 
 export interface BitbucketPR {
@@ -58,23 +97,67 @@ interface PaginatedResponse<T> {
 }
 
 async function fetchPaginated<T>(url: string): Promise<PaginatedResponse<T>> {
-  const response = await fetch(url, { headers: getHeaders() });
+  log("Fetching:", url);
+
+  const headers = getHeaders();
+  const response = await fetch(url, { headers });
+
+  log("Response status:", response.status, response.statusText);
+
   if (!response.ok) {
-    throw new Error(`Bitbucket API error: ${response.status} ${response.statusText}`);
+    const body = await response.text();
+    logError("API Error Response:", {
+      status: response.status,
+      statusText: response.statusText,
+      body: body.slice(0, 500),
+      url,
+    });
+
+    // Provide helpful error messages
+    if (response.status === 401) {
+      throw new Error(
+        `Bitbucket Auth Failed (401): Check your credentials.\n` +
+        `- If using App Password: Set both BITBUCKET_USERNAME and BITBUCKET_TOKEN\n` +
+        `- If using Repository Access Token: Set only BITBUCKET_TOKEN\n` +
+        `Response: ${body.slice(0, 200)}`
+      );
+    }
+    if (response.status === 403) {
+      throw new Error(
+        `Bitbucket Forbidden (403): Token lacks required permissions.\n` +
+        `Required scopes: repository:read, pullrequest:read\n` +
+        `Response: ${body.slice(0, 200)}`
+      );
+    }
+    if (response.status === 404) {
+      throw new Error(
+        `Bitbucket Not Found (404): Check workspace/repo names.\n` +
+        `Workspace: ${process.env.BITBUCKET_WORKSPACE}\n` +
+        `Repo: ${process.env.BITBUCKET_REPO}\n` +
+        `Response: ${body.slice(0, 200)}`
+      );
+    }
+
+    throw new Error(`Bitbucket API error: ${response.status} ${response.statusText} - ${body.slice(0, 200)}`);
   }
-  return response.json();
+
+  const data = await response.json();
+  log("Response data:", { valuesCount: data.values?.length, hasNext: !!data.next });
+  return data;
 }
 
 export async function* fetchPullRequests(since?: string): AsyncGenerator<BitbucketPR> {
   const { workspace, repo } = getConfig();
   let url = `${BITBUCKET_API}/repositories/${workspace}/${repo}/pullrequests?state=ALL&pagelen=50&sort=-updated_on`;
 
+  log("Fetching PRs since:", since || "beginning");
+
   while (url) {
     const data = await fetchPaginated<BitbucketPR>(url);
 
     for (const pr of data.values) {
-      // Stop if we've reached already-synced data
       if (since && pr.updated_on <= since) {
+        log("Reached already-synced data, stopping");
         return;
       }
       yield pr;
@@ -102,6 +185,8 @@ export async function* fetchPrComments(prId: number): AsyncGenerator<BitbucketCo
 export async function* fetchWorkspaceMembers(): AsyncGenerator<BitbucketMember> {
   const { workspace } = getConfig();
   let url = `${BITBUCKET_API}/workspaces/${workspace}/members?pagelen=100`;
+
+  log("Fetching workspace members");
 
   while (url) {
     const data = await fetchPaginated<BitbucketMember>(url);
@@ -134,4 +219,18 @@ export async function fetchPrDiffstat(
   }
 
   return { lines_added: linesAdded, lines_removed: linesRemoved };
+}
+
+// Helper to generate curl command for testing
+export function getCurlCommand(endpoint: string): string {
+  const { workspace, repo, token, username } = getConfig();
+  const url = `${BITBUCKET_API}${endpoint}`
+    .replace("{workspace}", workspace)
+    .replace("{repo}", repo);
+
+  if (username) {
+    return `curl -u "${username}:${token}" "${url}"`;
+  } else {
+    return `curl -H "Authorization: Bearer ${token}" "${url}"`;
+  }
 }
