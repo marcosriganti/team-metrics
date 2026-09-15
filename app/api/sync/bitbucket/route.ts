@@ -1,8 +1,7 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import {
   fetchPullRequests,
   fetchPrComments,
-  fetchWorkspaceMembers,
   fetchPrDiffstat,
 } from "@/lib/bitbucket";
 import {
@@ -13,45 +12,50 @@ import {
   upsertTeamMember,
 } from "@/lib/db";
 
-// Save progress every N items
-const SAVE_INTERVAL = 5;
+// Defaults
+const DEFAULT_LIMIT = 50;        // Max PRs per sync run
+const DEFAULT_DELAY_MS = 200;    // Delay between API calls (rate limiting)
+const SAVE_INTERVAL = 5;         // Save progress every N items
 
-export async function POST() {
+function sleep(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+export async function POST(request: NextRequest) {
   try {
+    // Parse options from request body
+    const body = await request.json().catch(() => ({}));
+    const limit = body.limit ?? DEFAULT_LIMIT;
+    const delayMs = body.delayMs ?? DEFAULT_DELAY_MS;
+    const startDate = body.startDate; // ISO string, e.g., "2024-01-01"
+
+    // Get last sync point
     const syncLog = getSyncLog("bitbucket");
-    const since = syncLog?.last_synced_at;
+    let since = syncLog?.last_synced_at;
+
+    // If startDate provided, use it as the lower bound
+    if (startDate) {
+      since = startDate;
+      console.log(`[Bitbucket] Using startDate filter: ${startDate}`);
+    }
 
     let prCount = 0;
     let commentCount = 0;
-    let lastUpdatedAt: string | null = null;
     const seenAuthors = new Set<string>();
 
-    // Try to sync workspace members (optional - may fail with limited token scope)
-    try {
-      console.log("[Bitbucket] Fetching workspace members...");
-      let memberCount = 0;
-      for await (const member of fetchWorkspaceMembers()) {
-        upsertTeamMember({
-          source: "bitbucket",
-          external_id: member.user.uuid,
-          display_name: member.user.display_name,
-          email: member.user.email || null,
-        });
-        memberCount++;
-      }
-      console.log(`[Bitbucket] Synced ${memberCount} workspace members`);
-    } catch (error) {
-      console.warn("[Bitbucket] Could not fetch workspace members (token may lack account:read scope). Will extract from PRs instead.");
-    }
-
-    // Sync pull requests
-    console.log("[Bitbucket] Fetching pull requests since:", since || "beginning");
-    console.log("[Bitbucket] Progress is saved every", SAVE_INTERVAL, "PRs - safe to stop anytime");
+    console.log("[Bitbucket] Sync config:", { limit, delayMs, since: since || "all time" });
+    console.log("[Bitbucket] Progress saved every", SAVE_INTERVAL, "PRs - safe to stop anytime");
 
     for await (const pr of fetchPullRequests(since)) {
-      // Track the most recent updated_at for resuming
-      if (!lastUpdatedAt || pr.updated_on > lastUpdatedAt) {
-        lastUpdatedAt = pr.updated_on;
+      // Check limit
+      if (prCount >= limit) {
+        console.log(`[Bitbucket] Reached limit of ${limit} PRs. Run sync again for more.`);
+        break;
+      }
+
+      // Rate limiting
+      if (prCount > 0) {
+        await sleep(delayMs);
       }
 
       // Extract team member from PR author
@@ -68,9 +72,10 @@ export async function POST() {
       // Fetch diffstat for line counts
       let diffstat = { lines_added: 0, lines_removed: 0 };
       try {
+        await sleep(delayMs); // Rate limit
         diffstat = await fetchPrDiffstat(pr.id);
       } catch (e) {
-        console.warn(`[Bitbucket] Could not fetch diffstat for PR #${pr.id}:`, e);
+        console.warn(`[Bitbucket] Could not fetch diffstat for PR #${pr.id}`);
       }
 
       upsertPullRequest({
@@ -89,6 +94,7 @@ export async function POST() {
 
       // Fetch comments for this PR
       try {
+        await sleep(delayMs); // Rate limit
         for await (const comment of fetchPrComments(pr.id)) {
           if (!seenAuthors.has(comment.user.uuid)) {
             seenAuthors.add(comment.user.uuid);
@@ -113,28 +119,31 @@ export async function POST() {
           commentCount++;
         }
       } catch (e) {
-        console.warn(`[Bitbucket] Could not fetch comments for PR #${pr.id}:`, e);
+        console.warn(`[Bitbucket] Could not fetch comments for PR #${pr.id}`);
       }
 
       prCount++;
-      console.log(`[Bitbucket] PR ${prCount}: #${pr.id} "${pr.title.slice(0, 40)}..." (${pr.state})`);
+      console.log(`[Bitbucket] ${prCount}/${limit}: PR #${pr.id} "${pr.title.slice(0, 40)}..."`);
 
       // Save progress periodically
       if (prCount % SAVE_INTERVAL === 0) {
         insertSyncLog("bitbucket", prCount);
-        console.log(`[Bitbucket] ✓ Progress saved at ${prCount} PRs - safe to stop`);
+        console.log(`[Bitbucket] ✓ Progress saved at ${prCount} PRs`);
       }
     }
 
     // Final save
     insertSyncLog("bitbucket", prCount);
-    console.log(`[Bitbucket] ✓ Sync complete: ${prCount} PRs, ${commentCount} comments, ${seenAuthors.size} authors`);
+
+    const hasMore = prCount >= limit;
+    console.log(`[Bitbucket] ✓ Done: ${prCount} PRs, ${commentCount} comments${hasMore ? " (more available)" : ""}`);
 
     return NextResponse.json({
       synced: prCount,
       comments: commentCount,
       authors: seenAuthors.size,
-      message: `Synced ${prCount} PRs, ${commentCount} comments, ${seenAuthors.size} authors`,
+      hasMore,
+      message: `Synced ${prCount} PRs${hasMore ? ` (limit ${limit}, run again for more)` : ""}`,
     });
   } catch (error) {
     console.error("[Bitbucket] Sync error:", error);
@@ -143,4 +152,13 @@ export async function POST() {
       { status: 500 }
     );
   }
+}
+
+// GET to check sync status
+export async function GET() {
+  const syncLog = getSyncLog("bitbucket");
+  return NextResponse.json({
+    lastSyncedAt: syncLog?.last_synced_at || null,
+    source: "bitbucket",
+  });
 }
