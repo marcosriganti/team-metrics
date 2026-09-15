@@ -15,6 +15,16 @@ const columns: Column<TeamMemberMetrics>[] = [
     sortValue: (row) => row.displayName,
   },
   {
+    id: "source",
+    header: "Source",
+    accessor: (row) => (
+      <span className={`text-xs px-2 py-0.5 rounded ${row.source === "bitbucket" ? "bg-blue-100 text-blue-800" : "bg-green-100 text-green-800"}`}>
+        {row.source === "bitbucket" ? "BB" : "JIRA"}
+      </span>
+    ),
+    sortValue: (row) => row.source,
+  },
+  {
     id: "prsAuthored",
     header: "PRs",
     accessor: (row) => row.bitbucket.prsAuthored,

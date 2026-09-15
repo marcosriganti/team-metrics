@@ -300,35 +300,24 @@ export function getTeamMetrics(
 ): TeamMemberMetrics[] {
   const db = getDb();
 
-  // Get all team members grouped by display_name to handle same person in both systems
+  // Get all team members - each person has a separate record per source system
+  // Bitbucket external_id (UUID like {abc-123}) is different from JIRA account_id
   const members = db
     .prepare("SELECT external_id, display_name, source FROM team_members WHERE is_active = 1")
     .all() as { external_id: string; display_name: string; source: "bitbucket" | "jira" }[];
 
-  // Group by display_name to merge Bitbucket and JIRA identities
-  const memberMap = new Map<string, { bitbucketId: string | null; jiraId: string | null }>();
-
-  for (const member of members) {
-    const existing = memberMap.get(member.display_name) || { bitbucketId: null, jiraId: null };
-    if (member.source === "bitbucket") {
-      existing.bitbucketId = member.external_id;
-    } else {
-      existing.jiraId = member.external_id;
-    }
-    memberMap.set(member.display_name, existing);
-  }
-
-  // Build metrics for each unique person
-  // IMPORTANT: Only query metrics if user has an ID in that system, otherwise return zeros
-  return Array.from(memberMap.entries()).map(([displayName, ids]) => ({
-    userId: ids.bitbucketId || ids.jiraId || "",
-    displayName,
-    source: ids.bitbucketId ? "bitbucket" : "jira",
-    bitbucket: ids.bitbucketId
-      ? getBitbucketMetrics(ids.bitbucketId, startDate, endDate)
+  // Each member only gets metrics from their native system
+  // Cross-system metrics would require manual identity mapping which we don't have
+  return members.map((member) => ({
+    userId: member.external_id,
+    displayName: member.display_name,
+    source: member.source,
+    // Only query the system the user belongs to - IDs are incompatible between systems
+    bitbucket: member.source === "bitbucket"
+      ? getBitbucketMetrics(member.external_id, startDate, endDate)
       : emptyBitbucketMetrics,
-    jira: ids.jiraId
-      ? getJiraMetrics(ids.jiraId, startDate, endDate)
+    jira: member.source === "jira"
+      ? getJiraMetrics(member.external_id, startDate, endDate)
       : emptyJiraMetrics,
   }));
 }
