@@ -13,6 +13,9 @@ import {
   upsertTeamMember,
 } from "@/lib/db";
 
+// Save progress every N items
+const SAVE_INTERVAL = 5;
+
 export async function POST() {
   try {
     const syncLog = getSyncLog("bitbucket");
@@ -20,12 +23,13 @@ export async function POST() {
 
     let prCount = 0;
     let commentCount = 0;
-    let memberCount = 0;
+    let lastUpdatedAt: string | null = null;
     const seenAuthors = new Set<string>();
 
     // Try to sync workspace members (optional - may fail with limited token scope)
     try {
       console.log("[Bitbucket] Fetching workspace members...");
+      let memberCount = 0;
       for await (const member of fetchWorkspaceMembers()) {
         upsertTeamMember({
           source: "bitbucket",
@@ -38,12 +42,18 @@ export async function POST() {
       console.log(`[Bitbucket] Synced ${memberCount} workspace members`);
     } catch (error) {
       console.warn("[Bitbucket] Could not fetch workspace members (token may lack account:read scope). Will extract from PRs instead.");
-      console.warn("[Bitbucket] Error:", error instanceof Error ? error.message : error);
     }
 
     // Sync pull requests
     console.log("[Bitbucket] Fetching pull requests since:", since || "beginning");
+    console.log("[Bitbucket] Progress is saved every", SAVE_INTERVAL, "PRs - safe to stop anytime");
+
     for await (const pr of fetchPullRequests(since)) {
+      // Track the most recent updated_at for resuming
+      if (!lastUpdatedAt || pr.updated_on > lastUpdatedAt) {
+        lastUpdatedAt = pr.updated_on;
+      }
+
       // Extract team member from PR author
       if (!seenAuthors.has(pr.author.uuid)) {
         seenAuthors.add(pr.author.uuid);
@@ -56,7 +66,12 @@ export async function POST() {
       }
 
       // Fetch diffstat for line counts
-      const diffstat = await fetchPrDiffstat(pr.id);
+      let diffstat = { lines_added: 0, lines_removed: 0 };
+      try {
+        diffstat = await fetchPrDiffstat(pr.id);
+      } catch (e) {
+        console.warn(`[Bitbucket] Could not fetch diffstat for PR #${pr.id}:`, e);
+      }
 
       upsertPullRequest({
         bb_id: pr.id,
@@ -72,39 +87,48 @@ export async function POST() {
         merged_at: pr.merge_commit?.date || null,
       });
 
-      prCount++;
-      console.log(`[Bitbucket] Synced PR #${pr.id}: ${pr.title.slice(0, 50)}`);
-
       // Fetch comments for this PR
-      for await (const comment of fetchPrComments(pr.id)) {
-        // Extract team member from comment author
-        if (!seenAuthors.has(comment.user.uuid)) {
-          seenAuthors.add(comment.user.uuid);
-          upsertTeamMember({
-            source: "bitbucket",
-            external_id: comment.user.uuid,
-            display_name: comment.user.display_name,
-            email: null,
-          });
-        }
+      try {
+        for await (const comment of fetchPrComments(pr.id)) {
+          if (!seenAuthors.has(comment.user.uuid)) {
+            seenAuthors.add(comment.user.uuid);
+            upsertTeamMember({
+              source: "bitbucket",
+              external_id: comment.user.uuid,
+              display_name: comment.user.display_name,
+              email: null,
+            });
+          }
 
-        const content = comment.content.raw.toLowerCase();
-        upsertPrComment({
-          bb_id: comment.id,
-          pr_bb_id: pr.id,
-          author_uuid: comment.user.uuid,
-          author_name: comment.user.display_name,
-          created_at: comment.created_on,
-          is_approval: content.includes("lgtm") || content.includes("approved"),
-          is_request_changes: content.includes("request changes"),
-        });
-        commentCount++;
+          const content = comment.content.raw.toLowerCase();
+          upsertPrComment({
+            bb_id: comment.id,
+            pr_bb_id: pr.id,
+            author_uuid: comment.user.uuid,
+            author_name: comment.user.display_name,
+            created_at: comment.created_on,
+            is_approval: content.includes("lgtm") || content.includes("approved"),
+            is_request_changes: content.includes("request changes"),
+          });
+          commentCount++;
+        }
+      } catch (e) {
+        console.warn(`[Bitbucket] Could not fetch comments for PR #${pr.id}:`, e);
+      }
+
+      prCount++;
+      console.log(`[Bitbucket] PR ${prCount}: #${pr.id} "${pr.title.slice(0, 40)}..." (${pr.state})`);
+
+      // Save progress periodically
+      if (prCount % SAVE_INTERVAL === 0) {
+        insertSyncLog("bitbucket", prCount);
+        console.log(`[Bitbucket] ✓ Progress saved at ${prCount} PRs - safe to stop`);
       }
     }
 
+    // Final save
     insertSyncLog("bitbucket", prCount);
-
-    console.log(`[Bitbucket] Sync complete: ${prCount} PRs, ${commentCount} comments, ${seenAuthors.size} unique authors`);
+    console.log(`[Bitbucket] ✓ Sync complete: ${prCount} PRs, ${commentCount} comments, ${seenAuthors.size} authors`);
 
     return NextResponse.json({
       synced: prCount,
