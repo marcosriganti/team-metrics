@@ -20,19 +20,41 @@ export async function POST() {
 
     let prCount = 0;
     let commentCount = 0;
+    let memberCount = 0;
+    const seenAuthors = new Set<string>();
 
-    // Sync workspace members first
-    for await (const member of fetchWorkspaceMembers()) {
-      upsertTeamMember({
-        source: "bitbucket",
-        external_id: member.user.uuid,
-        display_name: member.user.display_name,
-        email: member.user.email || null,
-      });
+    // Try to sync workspace members (optional - may fail with limited token scope)
+    try {
+      console.log("[Bitbucket] Fetching workspace members...");
+      for await (const member of fetchWorkspaceMembers()) {
+        upsertTeamMember({
+          source: "bitbucket",
+          external_id: member.user.uuid,
+          display_name: member.user.display_name,
+          email: member.user.email || null,
+        });
+        memberCount++;
+      }
+      console.log(`[Bitbucket] Synced ${memberCount} workspace members`);
+    } catch (error) {
+      console.warn("[Bitbucket] Could not fetch workspace members (token may lack account:read scope). Will extract from PRs instead.");
+      console.warn("[Bitbucket] Error:", error instanceof Error ? error.message : error);
     }
 
     // Sync pull requests
+    console.log("[Bitbucket] Fetching pull requests since:", since || "beginning");
     for await (const pr of fetchPullRequests(since)) {
+      // Extract team member from PR author
+      if (!seenAuthors.has(pr.author.uuid)) {
+        seenAuthors.add(pr.author.uuid);
+        upsertTeamMember({
+          source: "bitbucket",
+          external_id: pr.author.uuid,
+          display_name: pr.author.display_name,
+          email: null,
+        });
+      }
+
       // Fetch diffstat for line counts
       const diffstat = await fetchPrDiffstat(pr.id);
 
@@ -51,9 +73,21 @@ export async function POST() {
       });
 
       prCount++;
+      console.log(`[Bitbucket] Synced PR #${pr.id}: ${pr.title.slice(0, 50)}`);
 
       // Fetch comments for this PR
       for await (const comment of fetchPrComments(pr.id)) {
+        // Extract team member from comment author
+        if (!seenAuthors.has(comment.user.uuid)) {
+          seenAuthors.add(comment.user.uuid);
+          upsertTeamMember({
+            source: "bitbucket",
+            external_id: comment.user.uuid,
+            display_name: comment.user.display_name,
+            email: null,
+          });
+        }
+
         const content = comment.content.raw.toLowerCase();
         upsertPrComment({
           bb_id: comment.id,
@@ -70,13 +104,16 @@ export async function POST() {
 
     insertSyncLog("bitbucket", prCount);
 
+    console.log(`[Bitbucket] Sync complete: ${prCount} PRs, ${commentCount} comments, ${seenAuthors.size} unique authors`);
+
     return NextResponse.json({
       synced: prCount,
       comments: commentCount,
-      message: `Synced ${prCount} PRs and ${commentCount} comments`,
+      authors: seenAuthors.size,
+      message: `Synced ${prCount} PRs, ${commentCount} comments, ${seenAuthors.size} authors`,
     });
   } catch (error) {
-    console.error("Bitbucket sync error:", error);
+    console.error("[Bitbucket] Sync error:", error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Sync failed" },
       { status: 500 }
