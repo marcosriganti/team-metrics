@@ -7,12 +7,14 @@ import {
   insertIssueTransition,
   clearIssueTransitions,
   upsertTeamMember,
+  getJiraIssueStatus,
+  hasIssueTransitions,
 } from "@/lib/db";
 
 // Defaults
-const DEFAULT_LIMIT = 50;        // Max issues per sync run
-const DEFAULT_DELAY_MS = 200;    // Delay between API calls (rate limiting)
-const SAVE_INTERVAL = 10;        // Save progress every N items
+const DEFAULT_LIMIT = 50;
+const DEFAULT_DELAY_MS = 200;
+const SAVE_INTERVAL = 10;
 
 function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -20,17 +22,14 @@ function sleep(ms: number) {
 
 export async function POST(request: NextRequest) {
   try {
-    // Parse options from request body
     const body = await request.json().catch(() => ({}));
     const limit = body.limit ?? DEFAULT_LIMIT;
     const delayMs = body.delayMs ?? DEFAULT_DELAY_MS;
-    const startDate = body.startDate; // ISO string, e.g., "2024-01-01"
+    const startDate = body.startDate;
 
-    // Get last sync point
     const syncLog = getSyncLog("jira");
     let since = syncLog?.last_synced_at;
 
-    // If startDate provided, use it as the lower bound
     if (startDate) {
       since = startDate;
       console.log(`[JIRA] Using startDate filter: ${startDate}`);
@@ -38,24 +37,31 @@ export async function POST(request: NextRequest) {
 
     let issueCount = 0;
     let transitionCount = 0;
+    let skippedResolved = 0;
+    let apiCalls = 0;
     const seenAssignees = new Set<string>();
 
     console.log("[JIRA] Sync config:", { limit, delayMs, since: since || "all time" });
-    console.log("[JIRA] Progress saved every", SAVE_INTERVAL, "issues - safe to stop anytime");
+    console.log("[JIRA] Smart caching: skipping changelog for resolved issues already in DB");
 
     for await (const issue of fetchIssues(since)) {
-      // Check limit
+      apiCalls++;
+
       if (issueCount >= limit) {
         console.log(`[JIRA] Reached limit of ${limit} issues. Run sync again for more.`);
         break;
       }
 
-      // Rate limiting
       if (issueCount > 0) {
         await sleep(delayMs);
       }
 
-      // Store issue
+      // Check if this issue is already resolved in our DB with transitions
+      const issueStatus = getJiraIssueStatus(issue.key);
+      const isResolved = issue.fields.resolutiondate !== null;
+      const alreadyCached = issueStatus.exists && issueStatus.resolved && hasIssueTransitions(issue.key);
+
+      // Always update basic issue info
       upsertJiraIssue({
         issue_key: issue.key,
         issue_type: issue.fields.issuetype.name,
@@ -68,7 +74,7 @@ export async function POST(request: NextRequest) {
         resolved_at: issue.fields.resolutiondate,
       });
 
-      // Track unique assignees as team members
+      // Track unique assignees
       if (issue.fields.assignee && !seenAssignees.has(issue.fields.assignee.accountId)) {
         seenAssignees.add(issue.fields.assignee.accountId);
         upsertTeamMember({
@@ -79,9 +85,18 @@ export async function POST(request: NextRequest) {
         });
       }
 
-      // Fetch transitions for this issue
+      // Skip changelog fetch if already resolved and cached
+      if (alreadyCached) {
+        skippedResolved++;
+        console.log(`[JIRA] SKIP changelog: ${issue.key} already cached (resolved)`);
+        issueCount++;
+        continue;
+      }
+
+      // Fetch changelog (only for new or unresolved issues)
       try {
-        await sleep(delayMs); // Rate limit
+        await sleep(delayMs);
+        apiCalls++;
         clearIssueTransitions(issue.key);
 
         for await (const entry of fetchIssueChangelog(issue.key)) {
@@ -103,27 +118,29 @@ export async function POST(request: NextRequest) {
       }
 
       issueCount++;
-      console.log(`[JIRA] ${issueCount}/${limit}: ${issue.key} "${issue.fields.summary.slice(0, 40)}..."`);
+      const status = isResolved ? "✓ RESOLVED" : issue.fields.status.name;
+      console.log(`[JIRA] ${issueCount}/${limit}: ${issue.key} [${status}] "${issue.fields.summary.slice(0, 30)}..."`);
 
-      // Save progress periodically
       if (issueCount % SAVE_INTERVAL === 0) {
         insertSyncLog("jira", issueCount);
         console.log(`[JIRA] ✓ Progress saved at ${issueCount} issues`);
       }
     }
 
-    // Final save
     insertSyncLog("jira", issueCount);
 
     const hasMore = issueCount >= limit;
-    console.log(`[JIRA] ✓ Done: ${issueCount} issues, ${transitionCount} transitions${hasMore ? " (more available)" : ""}`);
+    console.log(`[JIRA] ✓ Done: ${issueCount} issues, ${transitionCount} transitions`);
+    console.log(`[JIRA] ✓ Skipped ${skippedResolved} resolved issues (changelog already cached)`);
+    console.log(`[JIRA] ✓ API calls made: ${apiCalls}`);
 
     return NextResponse.json({
       synced: issueCount,
       transitions: transitionCount,
-      assignees: seenAssignees.size,
+      skippedResolved,
+      apiCalls,
       hasMore,
-      message: `Synced ${issueCount} issues${hasMore ? ` (limit ${limit}, run again for more)` : ""}`,
+      message: `Synced ${issueCount} issues (${skippedResolved} skipped as cached)`,
     });
   } catch (error) {
     console.error("[JIRA] Sync error:", error);
@@ -134,7 +151,6 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// GET to check sync status
 export async function GET() {
   const syncLog = getSyncLog("jira");
   return NextResponse.json({

@@ -273,3 +273,49 @@ export function getDistinctJiraStatuses(): string[] {
     .all() as { to_status: string }[];
   return rows.map((r) => r.to_status);
 }
+
+// Check if a PR is already finalized (merged/declined/superseded)
+// Returns: { exists: boolean, finalized: boolean, state: string | null, updatedAt: string | null }
+export function getPullRequestStatus(bbId: number): {
+  exists: boolean;
+  finalized: boolean;
+  state: string | null;
+  updatedAt: string | null;
+} {
+  const db = getDb();
+  const row = db
+    .prepare("SELECT state, updated_at FROM pull_requests WHERE bb_id = ?")
+    .get(bbId) as { state: string; updated_at: string } | undefined;
+
+  if (!row) {
+    return { exists: false, finalized: false, state: null, updatedAt: null };
+  }
+
+  // OPEN PRs can still change, others are finalized
+  const finalized = row.state !== "OPEN";
+  return { exists: true, finalized, state: row.state, updatedAt: row.updated_at };
+}
+
+// Check if a JIRA issue is already resolved
+// Returns: { exists: boolean, resolved: boolean }
+export function getJiraIssueStatus(issueKey: string): { exists: boolean; resolved: boolean } {
+  const db = getDb();
+  const row = db
+    .prepare("SELECT resolved_at FROM jira_issues WHERE issue_key = ?")
+    .get(issueKey) as { resolved_at: string | null } | undefined;
+
+  if (!row) {
+    return { exists: false, resolved: false };
+  }
+
+  return { exists: true, resolved: row.resolved_at !== null };
+}
+
+// Check if we have changelog for an issue
+export function hasIssueTransitions(issueKey: string): boolean {
+  const db = getDb();
+  const row = db
+    .prepare("SELECT COUNT(*) as count FROM issue_transitions WHERE issue_key = ?")
+    .get(issueKey) as { count: number };
+  return row.count > 0;
+}
